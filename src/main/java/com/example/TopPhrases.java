@@ -171,19 +171,6 @@ class PhraseItemProcessor implements ItemProcessor<String, List<PhraseCount>> {
 		return phraseCounts;
 	}
 
-	public void getCount(String phrase) throws IOException {
-
-		List<Integer> counts = jdbcTemplate.queryForList("SELECT phrase_count FROM phrase_count where phrase = ?",
-				int.class, phrase);
-		if (counts.iterator().hasNext()) {
-			Integer count = counts.iterator().next();
-			count++;
-			jdbcTemplate.update("update phrase_count set phrase_count= ? where phrase = ? ", count, phrase);
-		} else {
-			jdbcTemplate.update("INSERT INTO phrase_count (phrase, phrase_count) VALUES (?, ?)", phrase, 1);
-		}
-	}
-
 }
 
 class PhraseCount {
