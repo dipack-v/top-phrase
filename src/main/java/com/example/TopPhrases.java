@@ -1,10 +1,5 @@
 package com.example;
 
-import java.io.FileNotFoundException;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.OutputStream;
-import java.io.OutputStreamWriter;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -12,23 +7,21 @@ import java.util.List;
 
 import javax.sql.DataSource;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
-import org.springframework.batch.core.BatchStatus;
 import org.springframework.batch.core.Job;
-import org.springframework.batch.core.JobExecution;
-import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.Step;
 import org.springframework.batch.core.configuration.annotation.EnableBatchProcessing;
 import org.springframework.batch.core.configuration.annotation.JobBuilderFactory;
 import org.springframework.batch.core.configuration.annotation.StepBuilderFactory;
 import org.springframework.batch.core.launch.support.RunIdIncrementer;
-import org.springframework.batch.core.listener.JobExecutionListenerSupport;
 import org.springframework.batch.item.ItemProcessor;
+import org.springframework.batch.item.ItemReader;
 import org.springframework.batch.item.ItemStreamException;
 import org.springframework.batch.item.ItemWriter;
+import org.springframework.batch.item.database.JdbcCursorItemReader;
 import org.springframework.batch.item.file.FlatFileItemReader;
+import org.springframework.batch.item.file.FlatFileItemWriter;
 import org.springframework.batch.item.file.mapping.PassThroughLineMapper;
+import org.springframework.batch.item.file.transform.PassThroughLineAggregator;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
@@ -39,7 +32,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 
 import com.google.gson.Gson;
-import com.google.gson.stream.JsonWriter;
 
 @SpringBootApplication
 public class TopPhrases {
@@ -67,7 +59,6 @@ class BatchConfiguration {
 		FlatFileItemReader<String> reader = new FlatFileItemReader<String>();
 		reader.setResource(new FileSystemResource("keywords.txt"));
 		reader.setLineMapper(new PassThroughLineMapper());
-
 		return reader;
 	}
 
@@ -81,16 +72,11 @@ class BatchConfiguration {
 		return new PhraseCountWriter();
 	}
 
-	@Bean
-	public JobExecutionListener listener() {
-		return new JobCompletionNotificationListener(new JdbcTemplate(dataSource));
-	}
-
 	// tag::jobstep[]
 	@Bean
 	public Job topPhraseJob() {
-		return jobBuilderFactory.get("topPhraseJob").incrementer(new RunIdIncrementer()).listener(listener())
-				.flow(step1()).end().build();
+		return jobBuilderFactory.get("topPhraseJob").incrementer(new RunIdIncrementer()).flow(step1()).next(step2())
+				.end().build();
 	}
 
 	@Bean
@@ -98,58 +84,36 @@ class BatchConfiguration {
 		return stepBuilderFactory.get("step1").<String, List<PhraseCount>>chunk(10).faultTolerant()
 				.skip(ItemStreamException.class).reader(reader()).processor(processor()).writer(writer()).build();
 	}
+
+	@Bean
+	public Step step2() {
+		return stepBuilderFactory.get("step2").<PhraseCount, PhraseCount>chunk(10).faultTolerant()
+				.skip(ItemStreamException.class).reader(databaseItemReader(dataSource)).writer(countWriter()).build();
+	}
 	// end::jobstep[]
-}
 
-class JobCompletionNotificationListener extends JobExecutionListenerSupport {
-
-	private static final Logger log = LoggerFactory.getLogger(JobCompletionNotificationListener.class);
-
-	private final JdbcTemplate jdbcTemplate;
-
-	private Gson gson = new Gson();
-
-	@Autowired
-	public JobCompletionNotificationListener(JdbcTemplate jdbcTemplate) {
-		this.jdbcTemplate = jdbcTemplate;
-	}
-
-	@Override
-	public void afterJob(JobExecution jobExecution) {
-		if (jobExecution.getStatus() == BatchStatus.COMPLETED) {
-			log.info("!!! JOB FINISHED! Time to verify the results");
-
-			List<PhraseCount> results = jdbcTemplate.query(
-					"SELECT phrase, phrase_count FROM phrase_count order by phrase_count desc limit 100000 ",
-					new RowMapper<PhraseCount>() {
-						@Override
-						public PhraseCount mapRow(ResultSet rs, int row) throws SQLException {
-							return new PhraseCount(rs.getString(1), rs.getInt(2));
-						}
-					});
-
-			try {
-				writeJsonStream(new FileOutputStream("top-phrase.txt"), results);
-			} catch (FileNotFoundException e) {
-				log.error(e.getMessage(), e);
-			} catch (IOException e) {
-				log.error(e.getMessage(), e);
+	@Bean
+	ItemReader<PhraseCount> databaseItemReader(DataSource dataSource) {
+		JdbcCursorItemReader<PhraseCount> databaseReader = new JdbcCursorItemReader<>();
+		databaseReader.setDataSource(dataSource);
+		databaseReader.setSql("SELECT phrase, phrase_count FROM phrase_count order by phrase_count desc limit 100000 ");
+		databaseReader.setRowMapper(new RowMapper<PhraseCount>() {
+			@Override
+			public PhraseCount mapRow(ResultSet rs, int row) throws SQLException {
+				return new PhraseCount(rs.getString(1), rs.getInt(2));
 			}
+		});
 
-		}
+		return databaseReader;
 	}
 
-	public void writeJsonStream(OutputStream out, List<PhraseCount> messages) throws IOException {
-		JsonWriter writer = new JsonWriter(new OutputStreamWriter(out, "UTF-8"));
-		writer.setIndent("  ");
-		writer.beginArray();
-		for (PhraseCount message : messages) {
-			gson.toJson(message, PhraseCount.class, writer);
-		}
-		writer.endArray();
-		writer.close();
+	@Bean
+	public FlatFileItemWriter<PhraseCount> countWriter() {
+		FlatFileItemWriter<PhraseCount> writer = new FlatFileItemWriter<PhraseCount>();
+		writer.setResource(new FileSystemResource("output.txt"));
+		writer.setLineAggregator(new PassThroughLineAggregator<>());
+		return writer;
 	}
-
 }
 
 class PhraseItemProcessor implements ItemProcessor<String, List<PhraseCount>> {
@@ -171,6 +135,31 @@ class PhraseItemProcessor implements ItemProcessor<String, List<PhraseCount>> {
 		return phraseCounts;
 	}
 
+}
+
+class PhraseCountWriter implements ItemWriter<List<PhraseCount>> {
+
+	@Autowired
+	private JdbcTemplate jdbcTemplate;
+
+	@Override
+	public void write(List<? extends List<PhraseCount>> items) throws Exception {
+		for (List<PhraseCount> phraseCounts : items) {
+			for (PhraseCount phraseCount : phraseCounts) {
+				List<Integer> counts = jdbcTemplate.queryForList(
+						"select phrase_count from phrase_count where phrase = ?", int.class, phraseCount.getPhrase());
+				if (counts.iterator().hasNext()) {
+					Integer count = counts.iterator().next();
+					count++;
+					jdbcTemplate.update("update phrase_count set phrase_count= ? where phrase = ? ", count,
+							phraseCount.getPhrase());
+				} else {
+					jdbcTemplate.update("insert into phrase_count (phrase, phrase_count) values (?, ?)",
+							phraseCount.getPhrase(), 1);
+				}
+			}
+		}
+	}
 }
 
 class PhraseCount {
@@ -218,31 +207,5 @@ class PhraseCount {
 	@Override
 	public String toString() {
 		return new Gson().toJson(this);
-	}
-}
-
-class PhraseCountWriter implements ItemWriter<List<PhraseCount>> {
-
-	@Autowired
-	private JdbcTemplate jdbcTemplate;
-
-	@Override
-	public void write(List<? extends List<PhraseCount>> items) throws Exception {
-		for (List<PhraseCount> phraseCounts : items) {
-			for (PhraseCount phraseCount : phraseCounts) {
-				List<Integer> counts = jdbcTemplate.queryForList(
-						"select phrase_count from phrase_count where phrase = ?", int.class, phraseCount.getPhrase());
-				if (counts.iterator().hasNext()) {
-					Integer count = counts.iterator().next();
-					count++;
-					jdbcTemplate.update("update phrase_count set phrase_count= ? where phrase = ? ", count,
-							phraseCount.getPhrase());
-				} else {
-					jdbcTemplate.update("insert into phrase_count (phrase, phrase_count) values (?, ?)",
-							phraseCount.getPhrase(), 1);
-				}
-			}
-		}
-
 	}
 }
