@@ -88,12 +88,12 @@ class BatchConfiguration {
 	@Bean
 	public Step step2() {
 		return stepBuilderFactory.get("step2").<PhraseCount, PhraseCount>chunk(10).faultTolerant()
-				.skip(ItemStreamException.class).reader(databaseItemReader(dataSource)).writer(countWriter()).build();
+				.skip(ItemStreamException.class).reader(databaseItemReader()).writer(countWriter()).build();
 	}
 	// end::jobstep[]
 
 	@Bean
-	ItemReader<PhraseCount> databaseItemReader(DataSource dataSource) {
+	ItemReader<PhraseCount> databaseItemReader() {
 		JdbcCursorItemReader<PhraseCount> databaseReader = new JdbcCursorItemReader<>();
 		databaseReader.setDataSource(dataSource);
 		databaseReader.setSql("SELECT phrase, phrase_count FROM phrase_count order by phrase_count desc limit 100000 ");
