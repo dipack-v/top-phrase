@@ -8,7 +8,7 @@ import org.springframework.test.context.junit4.SpringRunner;
 
 @RunWith(SpringRunner.class)
 @SpringBootTest
-public class BootBatchApplicationTests {
+public class TopPhrasesTests {
 
 	@Test
 	public void contextLoads() {
